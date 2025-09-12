@@ -1,45 +1,136 @@
 const express = require("express");
-const { createClient } = require("@supabase/supabase-js");
-const serverless = require("serverless-http");
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
-);
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
+const PORT = 3000;
+
+// File simpan token
+const DATA_FILE = path.join(__dirname, "tokens.json");
+
 app.use(express.json());
 
-// test route
-app.get("/", (req, res) => {
-  res.json({ message: "API is working 🚀" });
-});
+// Baca data dari file
+function loadTokens() {
+  if (!fs.existsSync(DATA_FILE)) {
+    fs.writeFileSync(DATA_FILE, JSON.stringify([]));
+  }
+  return JSON.parse(fs.readFileSync(DATA_FILE));
+}
 
-// ✅ Register token
-app.post("/register", async (req, res) => {
+// Simpan data ke file
+function saveTokens(tokens) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(tokens, null, 2));
+}
+
+// ✅ Register token (belum aktif)
+app.post("/register", (req, res) => {
   const { token } = req.body;
   if (!token) return res.status(400).json({ error: "token required" });
 
-  const { data, error } = await supabase
-    .from("tokens")
-    .select("*")
-    .eq("token", token);
+  const tokens = loadTokens();
+  const exists = tokens.find(t => t.token === token);
 
-  if (error) return res.status(500).json({ error: error.message });
-  if (data.length > 0) {
-    return res.json({ message: "Token already registered", active: data[0].active });
+  if (exists) {
+    return res.json({ message: "Token already registered", active: exists.active });
   }
 
-  const { error: insertError } = await supabase
-    .from("tokens")
-    .insert([{ token, active: false }]);
+  tokens.push({
+    token,
+    active: false,               // default belum aktif
+    createdAt: new Date().toISOString(),
+    expireAt: null               // belum ada durasi
+  });
 
-  if (insertError) return res.status(500).json({ error: insertError.message });
-
+  saveTokens(tokens);
   res.json({ message: "Token registered", active: false });
 });
 
-// ... lanjutkan semua route yang kamu punya (activate, cek, deactivate, client-tokens)
+// ✅ Activate token (dengan durasi bulan atau permanen)
+app.post("/activate", (req, res) => {
+  const { token, durationMonths, permanent } = req.body;
+  if (!token) return res.status(400).json({ error: "token required" });
 
-module.exports = app;
-module.exports.handler = serverless(app);
+  const tokens = loadTokens();
+  const found = tokens.find(t => t.token === token);
+
+  if (!found) {
+    return res.status(404).json({ error: "Token not found" });
+  }
+
+  let expireAt = null;
+
+  if (permanent) {
+    expireAt = null; // tidak pernah expired
+  } else {
+    if (!durationMonths) return res.status(400).json({ error: "durationMonths required unless permanent" });
+    expireAt = new Date();
+    expireAt.setMonth(expireAt.getMonth() + durationMonths);
+    expireAt = expireAt.toISOString();
+  }
+
+  found.active = true;
+  found.expireAt = expireAt;
+
+  saveTokens(tokens);
+  res.json({
+    message: permanent ? "Token activated permanently" : "Token activated",
+    token: token,
+    expireAt: expireAt
+  });
+});
+
+// ✅ Cek token
+app.get("/cek", (req, res) => {
+  const { token } = req.query;
+  if (!token) return res.status(400).json({ error: "token required" });
+
+  const tokens = loadTokens();
+  const found = tokens.find(t => t.token === token);
+
+  if (!found) return res.json({ valid: false, reason: "not_found" });
+  if (!found.active) return res.json({ valid: false, reason: "inactive" });
+
+  if (found.expireAt === null) {
+    return res.json({ valid: true, expireAt: null, permanent: true });
+  }
+
+  const now = Date.now();
+  const expireAt = new Date(found.expireAt).getTime();
+
+  if (now <= expireAt) {
+    return res.json({ valid: true, expireAt: found.expireAt });
+  } else {
+    return res.json({ valid: false, reason: "expired", expireAt: found.expireAt });
+  }
+});
+
+// ✅ Deactivate token
+app.post("/deactivate", (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: "token required" });
+
+  const tokens = loadTokens();
+  const found = tokens.find(t => t.token === token);
+
+  if (!found) {
+    return res.status(404).json({ error: "Token not found" });
+  }
+
+  found.active = false;
+
+  saveTokens(tokens);
+  res.json({ message: "Token deactivated", token: token });
+});
+
+// ✅ Lihat semua token (apa adanya, tanpa masking)
+app.get("/client-tokens", (req, res) => {
+  const tokens = loadTokens();
+  res.json(tokens);
+});
+
+
+// Jalankan server
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+});
