@@ -1,15 +1,13 @@
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
 
-const app = express();
-const PORT = 3000;
-
-// 🔑 Supabase config
+// Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
 );
 
+const app = express();
 app.use(express.json());
 
 // ✅ Register token
@@ -37,7 +35,7 @@ app.post("/register", async (req, res) => {
   res.json({ message: "Token registered", active: false });
 });
 
-// ✅ Activate token (bulan / permanent)
+// ✅ Activate token
 app.post("/activate", async (req, res) => {
   const { token, durationMonths, permanent } = req.body;
   if (!token) return res.status(400).json({ error: "token required" });
@@ -120,6 +118,5 @@ app.get("/client-tokens", async (req, res) => {
   res.json(data);
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
-});
+// ❌ Jangan pakai app.listen di Vercel
+module.exports = app;
