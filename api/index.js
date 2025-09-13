@@ -100,7 +100,8 @@ app.post("/activate", async (req, res) => {
   }
 });
 
-// ✅ Cek token
+
+// ✅ Cek token (versi defensif)
 app.get("/cek", async (req, res) => {
   try {
     const { token } = req.query;
@@ -110,26 +111,36 @@ app.get("/cek", async (req, res) => {
     if (!found) return res.json({ valid: false, reason: "not_found" });
     if (!found.active) return res.json({ valid: false, reason: "inactive" });
 
-    if (found.expire_at === null) {
+    // Normalisasi nilai 'permanent'
+    const rawExpire = found.expire_at;
+    const isPermanent =
+      rawExpire === null ||
+      rawExpire === undefined ||
+      (typeof rawExpire === "string" && rawExpire.trim().toLowerCase() === "") ||
+      (typeof rawExpire === "string" && rawExpire.trim().toLowerCase() === "null");
+
+    if (isPermanent) {
       return res.json({ valid: true, expireAt: null, permanent: true });
     }
 
-    const now = Date.now();
-    const expMs = new Date(found.expire_at).getTime();
+    // Jika bukan permanent, parse tanggalnya
+    const expMs = new Date(rawExpire).getTime();
     if (Number.isNaN(expMs)) {
-      return res.json({ valid: false, reason: "expired", expireAt: found.expire_at });
+      // Data tidak valid, anggap expired (atau Anda bisa treat sebagai permanent, sesuai kebijakan Anda)
+      return res.json({ valid: false, reason: "expired", expireAt: rawExpire });
     }
 
-    res.json(
-      now <= expMs
+    return res.json(
+      Date.now() <= expMs
         ? { valid: true, expireAt: found.expire_at }
         : { valid: false, reason: "expired", expireAt: found.expire_at }
     );
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "internal_error", detail: err.message });
+    return res.status(500).json({ error: "internal_error", detail: err.message });
   }
 });
+
 
 // ✅ Deactivate token
 app.post("/deactivate", async (req, res) => {
