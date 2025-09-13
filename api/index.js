@@ -1,136 +1,169 @@
+require("dotenv").config();
 const express = require("express");
-const fs = require("fs");
-const path = require("path");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
-// File simpan token
-const DATA_FILE = path.join(__dirname, "tokens.json");
+// --- Koneksi Supabase (gunakan Service Role Key)
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  { auth: { persistSession: false } }
+);
 
 app.use(express.json());
 
-// Baca data dari file
-function loadTokens() {
-  if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify([]));
-  }
-  return JSON.parse(fs.readFileSync(DATA_FILE));
+/* ------------------- Helper Functions ------------------- */
+// Ambil token
+async function getTokenRow(token) {
+  const { data, error } = await supabase
+    .from("tokens")
+    .select("*")
+    .eq("token", token)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
 }
 
-// Simpan data ke file
-function saveTokens(tokens) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(tokens, null, 2));
+// Insert token baru
+async function insertToken(token) {
+  const { data, error } = await supabase
+    .from("tokens")
+    .insert([{ token, active: false }])
+    .select()
+    .single();
+  if (error && error.code !== "23505") throw error; // 23505: duplicate
+  return data;
 }
 
-// ✅ Register token (belum aktif)
-app.post("/register", (req, res) => {
-  const { token } = req.body;
-  if (!token) return res.status(400).json({ error: "token required" });
+// Update token
+async function updateToken(token, fields) {
+  const { data, error } = await supabase
+    .from("tokens")
+    .update(fields)
+    .eq("token", token)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
 
-  const tokens = loadTokens();
-  const exists = tokens.find(t => t.token === token);
+/* ------------------- ROUTES ------------------- */
 
-  if (exists) {
-    return res.json({ message: "Token already registered", active: exists.active });
+// ✅ Register token
+app.post("/register", async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: "token required" });
+
+    const existing = await getTokenRow(token);
+    if (existing) {
+      return res.json({ message: "Token already registered", active: existing.active });
+    }
+    await insertToken(token);
+    res.json({ message: "Token registered", active: false });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "internal_error", detail: err.message });
   }
-
-  tokens.push({
-    token,
-    active: false,               // default belum aktif
-    createdAt: new Date().toISOString(),
-    expireAt: null               // belum ada durasi
-  });
-
-  saveTokens(tokens);
-  res.json({ message: "Token registered", active: false });
 });
 
-// ✅ Activate token (dengan durasi bulan atau permanen)
-app.post("/activate", (req, res) => {
-  const { token, durationMonths, permanent } = req.body;
-  if (!token) return res.status(400).json({ error: "token required" });
+// ✅ Activate token
+app.post("/activate", async (req, res) => {
+  try {
+    const { token, durationMonths, permanent } = req.body;
+    if (!token) return res.status(400).json({ error: "token required" });
 
-  const tokens = loadTokens();
-  const found = tokens.find(t => t.token === token);
+    const found = await getTokenRow(token);
+    if (!found) return res.status(404).json({ error: "Token not found" });
 
-  if (!found) {
-    return res.status(404).json({ error: "Token not found" });
+    let expireAt = null;
+    if (!permanent) {
+      if (!durationMonths || Number(durationMonths) <= 0) {
+        return res.status(400).json({ error: "durationMonths required unless permanent" });
+      }
+      const d = new Date();
+      d.setMonth(d.getMonth() + Number(durationMonths));
+      expireAt = d.toISOString();
+    }
+
+    const updated = await updateToken(token, { active: true, expire_at: expireAt });
+    res.json({
+      message: permanent ? "Token activated permanently" : "Token activated",
+      token,
+      expireAt: updated.expire_at,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "internal_error", detail: err.message });
   }
-
-  let expireAt = null;
-
-  if (permanent) {
-    expireAt = null; // tidak pernah expired
-  } else {
-    if (!durationMonths) return res.status(400).json({ error: "durationMonths required unless permanent" });
-    expireAt = new Date();
-    expireAt.setMonth(expireAt.getMonth() + durationMonths);
-    expireAt = expireAt.toISOString();
-  }
-
-  found.active = true;
-  found.expireAt = expireAt;
-
-  saveTokens(tokens);
-  res.json({
-    message: permanent ? "Token activated permanently" : "Token activated",
-    token: token,
-    expireAt: expireAt
-  });
 });
 
 // ✅ Cek token
-app.get("/cek", (req, res) => {
-  const { token } = req.query;
-  if (!token) return res.status(400).json({ error: "token required" });
+app.get("/cek", async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: "token required" });
 
-  const tokens = loadTokens();
-  const found = tokens.find(t => t.token === token);
+    const found = await getTokenRow(token);
+    if (!found) return res.json({ valid: false, reason: "not_found" });
+    if (!found.active) return res.json({ valid: false, reason: "inactive" });
 
-  if (!found) return res.json({ valid: false, reason: "not_found" });
-  if (!found.active) return res.json({ valid: false, reason: "inactive" });
+    if (found.expire_at === null) {
+      return res.json({ valid: true, expireAt: null, permanent: true });
+    }
 
-  if (found.expireAt === null) {
-    return res.json({ valid: true, expireAt: null, permanent: true });
-  }
+    const now = Date.now();
+    const expMs = new Date(found.expire_at).getTime();
+    if (Number.isNaN(expMs)) {
+      return res.json({ valid: false, reason: "expired", expireAt: found.expire_at });
+    }
 
-  const now = Date.now();
-  const expireAt = new Date(found.expireAt).getTime();
-
-  if (now <= expireAt) {
-    return res.json({ valid: true, expireAt: found.expireAt });
-  } else {
-    return res.json({ valid: false, reason: "expired", expireAt: found.expireAt });
+    res.json(
+      now <= expMs
+        ? { valid: true, expireAt: found.expire_at }
+        : { valid: false, reason: "expired", expireAt: found.expire_at }
+    );
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "internal_error", detail: err.message });
   }
 });
 
 // ✅ Deactivate token
-app.post("/deactivate", (req, res) => {
-  const { token } = req.body;
-  if (!token) return res.status(400).json({ error: "token required" });
+app.post("/deactivate", async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: "token required" });
 
-  const tokens = loadTokens();
-  const found = tokens.find(t => t.token === token);
+    const found = await getTokenRow(token);
+    if (!found) return res.status(404).json({ error: "Token not found" });
 
-  if (!found) {
-    return res.status(404).json({ error: "Token not found" });
+    await updateToken(token, { active: false });
+    res.json({ message: "Token deactivated", token });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "internal_error", detail: err.message });
   }
-
-  found.active = false;
-
-  saveTokens(tokens);
-  res.json({ message: "Token deactivated", token: token });
 });
 
-// ✅ Lihat semua token (apa adanya, tanpa masking)
-app.get("/client-tokens", (req, res) => {
-  const tokens = loadTokens();
-  res.json(tokens);
+// ✅ Lihat semua token
+app.get("/client-tokens", async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("tokens")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error) throw error;
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "internal_error", detail: err.message });
+  }
 });
 
-
-// Jalankan server
+/* ------------------- Jalankan Server ------------------- */
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
